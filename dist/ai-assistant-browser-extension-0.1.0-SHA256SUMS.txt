@@ -1,0 +1,2 @@
+31be80dce35ec48b309bc1a9adb26e0075e3e98a3ade7a9459f42abd34789371  /workspace/dist/ai-assistant-browser-extension-0.1.0-linux.zip
+31be80dce35ec48b309bc1a9adb26e0075e3e98a3ade7a9459f42abd34789371  /workspace/dist/ai-assistant-browser-extension-0.1.0-windows.zip
