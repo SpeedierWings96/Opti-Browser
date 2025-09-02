@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "AI Assistant for Browser",
+  "description": "Context menu summarize/explain/translate/rewrite and popup chat using configurable AI providers.",
+  "version": "0.1.0",
+  "permissions": [
+    "storage",
+    "scripting",
+    "activeTab",
+    "contextMenus",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AI Assistant"
+  },
+  "options_page": "options.html"
+}
