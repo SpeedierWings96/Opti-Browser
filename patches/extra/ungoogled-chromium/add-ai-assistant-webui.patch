@@ -1,0 +1,285 @@
+--- a/chrome/browser/ui/webui/chrome_web_ui_configs.cc
++++ b/chrome/browser/ui/webui/chrome_web_ui_configs.cc
+@@ -46,6 +46,7 @@
+ #include "chrome/browser/ui/webui/signin_internals_ui.h"
+ #include "chrome/browser/ui/webui/sync_internals/sync_internals_ui.h"
+ #include "chrome/browser/ui/webui/translate_internals/translate_internals_ui.h"
++#include "chrome/browser/ui/webui/ai_assistant_ui.h"
+ #include "chrome/browser/ui/webui/usb_internals/usb_internals_ui.h"
+ #include "chrome/browser/ui/webui/user_actions/user_actions_ui.h"
+ #include "chrome/browser/ui/webui/version/version_ui.h"
+@@ -258,6 +259,7 @@ void RegisterChromeWebUIConfigs() {
+   map.AddWebUIConfig(std::make_unique<SiteEngagementUIConfig>());
+   map.AddWebUIConfig(std::make_unique<SyncInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<TranslateInternalsUIConfig>());
++  map.AddWebUIConfig(std::make_unique<AiAssistantUIConfig>());
+   map.AddWebUIConfig(std::make_unique<UsbInternalsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<UserActionsUIConfig>());
+   map.AddWebUIConfig(std::make_unique<VersionUIConfig>());
+--- a/chrome/common/webui_url_constants.cc
++++ b/chrome/common/webui_url_constants.cc
+@@ -72,6 +72,7 @@ bool IsSystemWebUIHost(std::string_view
+ // These hosts will also be suggested by BuiltinProvider.
+ base::span<const base::cstring_view> ChromeURLHosts() {
+   static constexpr auto kChromeURLHosts = std::to_array<base::cstring_view>({
++      "ai-assistant",
+       kChromeUIAboutHost,
+       kChromeUIAccessibilityHost,
+       kChromeUIActorInternalsHost,
+--- /dev/null
++++ b/chrome/browser/ui/webui/ai_assistant_ui.h
+@@ -0,0 +1,370 @@
++#ifndef CHROME_BROWSER_UI_WEBUI_AI_ASSISTANT_UI_H_
++#define CHROME_BROWSER_UI_WEBUI_AI_ASSISTANT_UI_H_
++
++#include <memory>
++#include <string>
++
++#include "base/memory/ref_counted_memory.h"
++#include "base/strings/string_piece.h"
++#include "chrome/browser/profiles/profile.h"
++#include "content/public/browser/url_data_source.h"
++#include "content/public/browser/web_ui.h"
++#include "content/public/browser/web_ui_controller.h"
++#include "content/public/browser/webui_config.h"
++#include "services/network/public/mojom/content_security_policy.mojom.h"
++
++class AiAssistantDataSource : public content::URLDataSource {
++ public:
++  AiAssistantDataSource() = default;
++  AiAssistantDataSource(const AiAssistantDataSource&) = delete;
++  AiAssistantDataSource& operator=(const AiAssistantDataSource&) = delete;
++  ~AiAssistantDataSource() override = default;
++
++  std::string GetSource() override { return "ai-assistant"; }
++  std::string GetMimeType(const GURL& url) override { return "text/html"; }
++
++  std::string GetContentSecurityPolicy(
++      network::mojom::CSPDirectiveName directive) override {
++    // Allow inline scripts for a single-file page and outbound network requests
++    // to user-configured providers.
++    if (directive == network::mojom::CSPDirectiveName::ScriptSrc)
++      return "script-src 'unsafe-inline'";
++    if (directive == network::mojom::CSPDirectiveName::ConnectSrc)
++      return "connect-src *";
++    if (directive == network::mojom::CSPDirectiveName::StyleSrc)
++      return "style-src 'unsafe-inline'";
++    return std::string();
++  }
++
++  void StartDataRequest(const GURL& url,
++                        const content::WebContents::Getter& wc_getter,
++                        GotDataCallback callback) override {
++    std::string html = R"(<!doctype html>
++<meta charset="utf-8">
++<title>AI Assistant</title>
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<meta name="color-scheme" content="light dark">
++<style>
++ :root{--bg:#fff;--fg:#111;--muted:#6b7280;--border:#e5e7eb;--elev:0 10px 30px rgba(0,0,0,.08)}
++ @media(prefers-color-scheme:dark){:root{--bg:#0b0d12;--fg:#e5e7eb;--muted:#9ca3af;--border:#1f2937;--elev:0 10px 30px rgba(0,0,0,.45)}}
++ html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Arial,sans-serif}
++ .wrap{max-width:1000px;margin:24px auto;padding:0 16px}
++ h1{font-size:18px;margin:0 0 12px 0}
++ .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
++ @media(max-width:1000px){.grid{grid-template-columns:1fr}}
++ .panel{border:1px solid var(--border);border-radius:12px;box-shadow:var(--elev);background:var(--bg)}
++ .panel .hd{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid var(--border);font-weight:600}
++ .panel .bd{padding:12px}
++ .row{display:flex;gap:8px}
++ .col{display:flex;flex-direction:column;gap:6px}
++ .input, textarea{width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:10px;background:transparent;color:var(--fg);padding:8px 10px}
++ textarea{min-height:80px;resize:vertical}
++ .btn{border:1px solid var(--border);background:transparent;color:var(--fg);border-radius:10px;padding:8px 12px;cursor:pointer}
++ .btn[disabled]{opacity:.6;cursor:not-allowed}
++ .muted{color:var(--muted)}
++ .messages{height:50vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
++ .msg{padding:10px 12px;border:1px solid var(--border);border-radius:10px;max-width:85%}
++ .msg.user{align-self:flex-end}
++ .msg.assistant{align-self:flex-start}
++ .footer{display:flex;gap:8px;align-items:center}
++ .kv{display:grid;grid-template-columns:1fr 2fr;gap:8px;align-items:center}
++</style>
++<div class="wrap">
++  <h1>AI Assistant</h1>
++  <div class="grid">
++    <div class="panel">
++      <div class="hd">Chat</div>
++      <div class="bd col">
++        <div id="messages" class="messages"></div>
++        <div class="footer">
++          <textarea id="input" placeholder="Ask something or paste text..."></textarea>
++          <button id="send" class="btn">Send</button>
++        </div>
++      </div>
++    </div>
++    <div class="panel">
++      <div class="hd">
++        <span>Provider Settings</span>
++        <button id="test" class="btn">Test</button>
++      </div>
++      <div class="bd col">
++        <div class="kv">
++          <label for="baseUrl">API Base URL</label>
++          <input id="baseUrl" class="input" placeholder="https://api.openai.com" />
++          <label for="apiKey">API Key</label>
++          <input id="apiKey" class="input" type="password" placeholder="sk-... (optional)" />
++          <label for="model">Model</label>
++          <input id="model" class="input" placeholder="gpt-4o-mini" />
++          <label for="temp">Temperature</label>
++          <input id="temp" class="input" type="number" min="0" max="2" step="0.1" placeholder="0.2" />
++        </div>
++        <div class="row">
++          <button id="save" class="btn">Save</button>
++          <span class="muted" id="status"></span>
++        </div>
++      </div>
++    </div>
++  </div>
++</div>
++<script>
++  const DEFAULTS = { baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o-mini', temperature: 0.2 };
++  function readConfig(){
++    try{ const raw = localStorage.getItem('ai.assistant.cfg'); if(!raw) return { ...DEFAULTS };
++      const parsed = JSON.parse(raw)||{}; return { ...DEFAULTS, ...parsed }; }catch(e){ return { ...DEFAULTS } }
++  }
++  function writeConfig(cfg){ localStorage.setItem('ai.assistant.cfg', JSON.stringify(cfg)); }
++
++  const messagesEl = document.getElementById('messages');
++  const inputEl = document.getElementById('input');
++  const sendBtn = document.getElementById('send');
++  const statusEl = document.getElementById('status');
++  const baseUrlEl = document.getElementById('baseUrl');
++  const apiKeyEl = document.getElementById('apiKey');
++  const modelEl = document.getElementById('model');
++  const tempEl = document.getElementById('temp');
++  const saveBtn = document.getElementById('save');
++  const testBtn = document.getElementById('test');
++
++  const conversation = [ { role: 'system', content: 'You are a concise and helpful assistant.' } ];
++
++  function appendMessage(role, content){
++    const div = document.createElement('div');
++    div.className = `msg ${role==='user'?'user':'assistant'}`;
++    div.textContent = content;
++    messagesEl.appendChild(div); messagesEl.scrollTop = messagesEl.scrollHeight;
++  }
++
++  function loadUI(){
++    const cfg = readConfig();
++    baseUrlEl.value = cfg.baseUrl || '';
++    apiKeyEl.value = cfg.apiKey || '';
++    modelEl.value = cfg.model || '';
++    tempEl.value = typeof cfg.temperature==='number' ? String(cfg.temperature) : '';
++  }
++
++  function saveUI(){
++    const cfg = {
++      baseUrl: baseUrlEl.value.trim() || DEFAULTS.baseUrl,
++      apiKey: apiKeyEl.value.trim(),
++      model: modelEl.value.trim() || DEFAULTS.model,
++      temperature: Math.max(0, Math.min(2, parseFloat(tempEl.value || DEFAULTS.temperature)))
++    };
++    writeConfig(cfg); statusEl.textContent = 'Saved'; setTimeout(()=>statusEl.textContent='', 1200);
++  }
++
++  async function callProvider(messages){
++    const cfg = readConfig();
++    const url = (cfg.baseUrl||'').replace(/\/$/, '') + '/v1/chat/completions';
++    const res = await fetch(url, {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json', ...(cfg.apiKey? { Authorization: `Bearer ${cfg.apiKey}` }: {}) },
++      body: JSON.stringify({ model: cfg.model||'gpt-4o-mini', temperature: typeof cfg.temperature==='number'? cfg.temperature:0.2, messages })
++    });
++    if(!res.ok){ throw new Error(`Provider error ${res.status}: ${await res.text()}`); }
++    const data = await res.json();
++    return (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || '').trim();
++  }
++
++  function buildMessages(action, text, conversationOverride){
++    if(action==='chat' && Array.isArray(conversationOverride)) return conversationOverride;
++    const system = { role: 'system', content: 'You are a concise and helpful assistant. Respond clearly.' };
++    let userContent='';
++    switch(action){
++      case 'summarize': userContent = `Summarize the following text in 5-8 bullet points.\n\nTEXT:\n${text}`; break;
++      case 'explain': userContent = `Explain the following text simply. Use short paragraphs.\n\nTEXT:\n${text}`; break;
++      case 'rewrite': userContent = `Rewrite the following text to be clearer and more concise while preserving meaning.\n\nTEXT:\n${text}`; break;
++      case 'translate': userContent = `Translate the following text to English. Preserve names and code as-is.\n\nTEXT:\n${text}`; break;
++      default: userContent = text||'';
++    }
++    return [system, { role: 'user', content: userContent }];
++  }
++
++  async function sendPrompt(){
++    const text = inputEl.value.trim(); if(!text) return;
++    inputEl.value=''; appendMessage('user', text); conversation.push({ role:'user', content:text });
++    sendBtn.disabled = true;
++    try{
++      const content = await callProvider(conversation);
++      appendMessage('assistant', content); conversation.push({ role:'assistant', content });
++    }catch(e){ appendMessage('assistant', `Error: ${e && e.message || e}`); }
++    finally{ sendBtn.disabled=false; inputEl.focus(); }
++  }
++
++  async function testProvider(){
++    sendBtn.disabled = true; statusEl.textContent = 'Testing...';
++    try{
++      const content = await callProvider([
++        { role:'system', content:'You are a concise assistant.' },
++        { role:'user', content:'Reply with a single word: ok' }
++      ]);
++      statusEl.textContent = `OK: ${content}`;
++    }catch(e){ statusEl.textContent = `Error: ${e && e.message || e}`; }
++    finally{ setTimeout(()=>statusEl.textContent='', 2500); sendBtn.disabled=false; }
++  }
++
++  function maybeHandleParams(){
++    const p = new URLSearchParams(location.search);
++    const action = p.get('action');
++    const text = p.get('text');
++    if(action && text){
++      const t = text.length > 8000 ? text.slice(0,8000) : text;
++      const msgs = buildMessages(action, t);
++      (async()=>{
++        appendMessage('user', `[${action}] ${t.slice(0,200)}${t.length>200?'...':''}`);
++        sendBtn.disabled = true;
++        try{ const content = await callProvider(msgs); appendMessage('assistant', content); }
++        catch(e){ appendMessage('assistant', `Error: ${e && e.message || e}`); }
++        finally{ sendBtn.disabled=false; }
++      })();
++    }
++  }
++
++  loadUI();
++  saveBtn.addEventListener('click', saveUI);
++  testBtn.addEventListener('click', testProvider);
++  sendBtn.addEventListener('click', sendPrompt);
++  inputEl.addEventListener('keydown', (ev)=>{ if(ev.key==='Enter' && (ev.ctrlKey||ev.metaKey)){ ev.preventDefault(); sendPrompt(); }});
++  maybeHandleParams();
++</script>
++)";
++    std::move(callback).Run(
++        base::MakeRefCounted<base::RefCountedString>(std::move(html)));
++  }
++};
++
++class AiAssistantUI;
++class AiAssistantUIConfig
++    : public content::DefaultWebUIConfig<AiAssistantUI> {
++ public:
++  AiAssistantUIConfig() : DefaultWebUIConfig("chrome", "ai-assistant") {}
++};
++
++class AiAssistantUI : public content::WebUIController {
++ public:
++  explicit AiAssistantUI(content::WebUI* web_ui)
++      : content::WebUIController(web_ui) {
++    content::URLDataSource::Add(Profile::FromWebUI(web_ui),
++                                std::make_unique<AiAssistantDataSource>());
++  }
++  AiAssistantUI(const AiAssistantUI&) = delete;
++  AiAssistantUI& operator=(const AiAssistantUI&) = delete;
++};
++
++#endif  // CHROME_BROWSER_UI_WEBUI_AI_ASSISTANT_UI_H_
+
