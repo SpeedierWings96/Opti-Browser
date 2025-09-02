@@ -1,0 +1,126 @@
+name: build-linux
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Optional tag to name artifacts (when not using push tags)
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: linux-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    # IMPORTANT: Chromium requires a powerful machine. Use a self-hosted runner.
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 1440
+    env:
+      # Avoid substituted hosts; fetch toolchains from canonical buckets.
+      CDS_CLANG_BUCKET_OVERRIDE: https://commondatastorage.googleapis.com/chromium-browser-clang
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install base deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            python3 python3-venv python3-pip git curl wget pkg-config \
+            build-essential ninja-build cmake lld \
+            libgtk-3-dev libnss3-dev libasound2-dev libxss-dev libdbus-1-dev \
+            libdrm-dev libxkbcommon-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxtst-dev libudev-dev libpci-dev libpulse-dev libkrb5-dev \
+            libcups2-dev libxdamage-dev libxshmfence-dev libgbm-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev
+
+      - name: Fetch Chromium sources (cached downloads)
+        run: |
+          mkdir -p build/download_cache
+          ./utils/downloads.py retrieve -c build/download_cache -i downloads.ini
+          ./utils/downloads.py unpack -c build/download_cache -i downloads.ini -- build/src
+
+      - name: Install extended build deps
+        run: |
+          cd build/src
+          sudo ./build/install-build-deps.sh --no-prompt --no-android --no-chromeos-fonts --no-nacl || true
+
+      - name: Prepare source tree (prune, patch, substitute domains)
+        run: |
+          ./utils/prune_binaries.py build/src pruning.list
+          ./utils/patches.py apply build/src patches
+          ./utils/domain_substitution.py apply -r domain_regex.list -f domain_substitution.list -c build/domsubcache.tar.gz build/src
+
+      - name: Install toolchains (Clang, Rust) and sysroot
+        env:
+          CDS_CLANG_BUCKET_OVERRIDE: https://commondatastorage.googleapis.com/chromium-browser-clang
+        run: |
+          cd build/src
+          ./tools/clang/scripts/update.py
+          ./tools/rust/update_rust.py
+          ./build/linux/sysroot_scripts/install-sysroot.py --arch=amd64
+
+      - name: Generate GN build files
+        run: |
+          cp flags.gn build/src/out/Default/args.gn
+          printf "\nis_debug=false\nis_component_build=false\nsymbol_level=0\n" >> build/src/out/Default/args.gn
+          cd build/src
+          ./tools/gn/bootstrap/bootstrap.py --skip-generate-buildfiles -j"$(nproc)" -o out/Default/gn
+          ./out/Default/gn gen out/Default --fail-on-unused-args
+
+      - name: Build Chromium (chrome + sandbox + chromedriver)
+        run: |
+          cd build/src
+          ninja -C out/Default chrome chrome_sandbox chromedriver -j "$(nproc)"
+
+      - name: Package Portable Linux bundle
+        id: package
+        run: |
+          set -e
+          REF_NAME=${GITHUB_REF_NAME}
+          if [ -z "$REF_NAME" ] || [ "$REF_NAME" = "" ]; then
+            REF_NAME=${{ github.event.inputs.tag || 'dev' }}
+          fi
+          OUTDIR="build/src/out/Default"
+          DEST_ROOT="${{ github.workspace }}/dist"
+          DEST_DIR="${DEST_ROOT}/opti-browser-linux-${REF_NAME}"
+          mkdir -p "$DEST_DIR"
+          # Copy common runtime files; ignore missing ones.
+          cp -a "$OUTDIR/chrome" "$DEST_DIR/" || true
+          cp -a "$OUTDIR/chrome_sandbox" "$DEST_DIR/" || true
+          cp -a "$OUTDIR/chromedriver" "$DEST_DIR/" || true
+          cp -a "$OUTDIR"/icudtl.dat "$DEST_DIR/" 2>/dev/null || true
+          cp -a "$OUTDIR"/*.pak "$DEST_DIR/" 2>/dev/null || true
+          cp -a "$OUTDIR"/*.bin "$DEST_DIR/" 2>/dev/null || true
+          cp -a "$OUTDIR"/resources* "$DEST_DIR/" 2>/dev/null || true
+          cp -a "$OUTDIR"/locales "$DEST_DIR/" 2>/dev/null || true
+          tar -C "$DEST_ROOT" -cJf "$DEST_ROOT/opti-browser-linux-${REF_NAME}.tar.xz" "$(basename "$DEST_DIR")"
+          (cd "$DEST_ROOT" && sha256sum "opti-browser-linux-${REF_NAME}.tar.xz" > "opti-browser-linux-${REF_NAME}.sha256")
+          echo "name=linux_tar::opti-browser-linux-${REF_NAME}.tar.xz" >> $GITHUB_OUTPUT
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: dist/*
+
+      - name: Upload to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/opti-browser-linux-${{ github.ref_name }}.tar.xz
+            dist/opti-browser-linux-${{ github.ref_name }}.sha256
+
+
