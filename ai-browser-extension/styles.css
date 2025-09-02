@@ -1,0 +1,13 @@
+/* Minimal styles to complement popup.html (most styling is inline) */
+:root {
+	--accent: #0b57d0;
+}
+a { color: var(--accent); }
+button {
+	background: var(--accent);
+	color: #fff;
+	border: none;
+	border-radius: 6px;
+	cursor: pointer;
+}
+button:disabled { opacity: 0.6; cursor: default; }
